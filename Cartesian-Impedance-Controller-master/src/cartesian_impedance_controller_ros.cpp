@@ -569,30 +569,65 @@ namespace cartesian_impedance_controller
   }
 
   void CartesianImpedanceControllerRos::trajUpdate()
-  {
-    if (ros::Time::now() > (this->traj_start_ + trajectory_.points.at(this->traj_index_).time_from_start))
+{
+    if (!traj_running_ || trajectory_.points.empty())
+      return;  // No active trajectory to execute
+  
+    ros::Time now = ros::Time::now();
+    ros::Duration elapsed = now - traj_start_;
+  
+    // Find the current segment of the trajectory
+    size_t index = 0;
+    while (index < trajectory_.points.size() - 1 &&
+           elapsed > trajectory_.points[index + 1].time_from_start)
     {
-      // Get end effector pose
-      Eigen::VectorXd q = Eigen::VectorXd::Map(trajectory_.points.at(this->traj_index_).positions.data(),
-                                               trajectory_.points.at(this->traj_index_).positions.size());
-      if (this->verbose_print_)
-      {
-        ROS_INFO_STREAM("Index " << this->traj_index_ << " q_nullspace: " << q.transpose());
-      }
-      // Update end-effector pose and nullspace
-      getFk(q, &this->position_d_target_, &this->orientation_d_target_);
-      this->setNullspaceConfig(q);
-      this->traj_index_++;
+      index++;
     }
-
-    if (ros::Time::now() > (this->traj_start_ + this->traj_duration_))
+  
+    // Check if we reached the end of the trajectory
+    if (index >= trajectory_.points.size() - 1)
     {
       ROS_INFO_STREAM("Finished executing trajectory.");
-      if (this->traj_as_->isActive())
+      if (traj_as_ && traj_as_->isActive())
       {
-        this->traj_as_->setSucceeded();
+        traj_as_->setSucceeded();
       }
-      this->traj_running_ = false;
+      traj_running_ = false;
+      return;
+    }
+  
+    // Get previous and next trajectory points
+    const auto &pt1 = trajectory_.points[index];
+    const auto &pt2 = trajectory_.points[index + 1];
+  
+    // Compute interpolation factor alpha based on elapsed time
+    double t1 = pt1.time_from_start.toSec();
+    double t2 = pt2.time_from_start.toSec();
+    double t = elapsed.toSec();
+  
+    double alpha = (t - t1) / (t2 - t1);
+    alpha = std::clamp(alpha, 0.0, 1.0);  // Ensure alpha is in [0, 1]
+  
+    // Linearly interpolate joint positions
+    Eigen::VectorXd q1 = Eigen::VectorXd::Map(pt1.positions.data(), pt1.positions.size());
+    Eigen::VectorXd q2 = Eigen::VectorXd::Map(pt2.positions.data(), pt2.positions.size());
+    Eigen::VectorXd q_interp = (1.0 - alpha) * q1 + alpha * q2;
+  
+    // Compute Cartesian position from interpolated joint configuration
+    Eigen::Vector3d pos_interp;
+    Eigen::Quaterniond unused_orientation;  // We ignore orientation for now
+    getFk(q_interp, &pos_interp, &unused_orientation);
+  
+    // Update desired position (orientation remains unchanged)
+    this->position_d_target_ = pos_interp;
+  
+    // Update nullspace configuration from interpolated joint positions
+    this->setNullspaceConfig(q_interp);
+  
+    // Debug output if enabled
+    if (verbose_print_)
+    {
+      ROS_INFO_STREAM("Interpolated Cartesian position: " << pos_interp.transpose());
     }
   }
 } // namespace cartesian_impedance_controller
